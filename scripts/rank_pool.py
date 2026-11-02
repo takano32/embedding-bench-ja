@@ -4,13 +4,15 @@
 スコア: bge-m3、Sarashina＝問いの埋め込みと記憶の保存済みベクトルのコサイン。lex＝字 bigram の BM25。
 leave-one-out（T）の除外は -inf にする。K は seed を必ず候補に入れる。
 プール（Jev が判定する）: bge 上位20、Sarashina 上位20、lex 上位10、seed。
+深いプール（閾値の分析用に Jev が追加で判定する）: bge 上位100、Sarashina 上位100、lex 上位10、seed。
 人手プール（本流が読んで判定する）: bge 上位8、Sarashina 上位8、lex 上位5、seed（Jev プールの部分集合）。
 """
 import json, sys
 import numpy as np
+import sys as _s, os as _o; _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
 from common import *
 
-POOL = dict(sar=20, bge=20, lex=10); HPOOL = dict(sar=8, bge=8, lex=5)
+POOL = dict(sar=20, bge=20, lex=10); HPOOL = dict(sar=8, bge=8, lex=5); DEEP = dict(sar=100, bge=100, lex=10)
 
 
 def main():
@@ -38,10 +40,10 @@ def main():
                     if np.isfinite(sc[k][i]) and int(i) not in s: s.append(int(i))
             if seed is not None and seed not in s: s.append(seed)
             return s
-        pl, hp = take(POOL), take(HPOOL)
-        pools[q["qid"]] = {"pool": pl, "hpool": hp, "seed": seed,
+        pl, hp, dp = take(POOL), take(HPOOL), take(DEEP)
+        pools[q["qid"]] = {"pool": pl, "hpool": hp, "deep": dp, "seed": seed,
             "cands": {str(i): {"sar": float(sc["sar"][i]), "bge": float(sc["bge"][i]), "lex": float(sc["lex"][i]),
-                               "r_sar": int(rank["sar"][i]), "r_bge": int(rank["bge"][i]), "r_lex": int(rank["lex"][i])} for i in pl}}
+                               "r_sar": int(rank["sar"][i]), "r_bge": int(rank["bge"][i]), "r_lex": int(rank["lex"][i])} for i in dp}}
     json.dump(pools, open(os.path.join(D, "pools.json"), "w"))
     sizes = [len(p["pool"]) for p in pools.values()]; hs = [len(p["hpool"]) for p in pools.values()]
     print("pool size mean", np.mean(sizes), "min", min(sizes), "max", max(sizes), "| hpool mean", np.mean(hs))

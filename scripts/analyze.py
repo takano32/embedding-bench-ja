@@ -7,6 +7,7 @@
 """
 import json, os, sys
 import numpy as np
+import sys as _s, os as _o; _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
 from common import *
 
 RNG = np.random.default_rng(20261102); B = 10000
@@ -161,51 +162,67 @@ def main():
         s1 = S["sar"][qi].copy(); s2 = S["bge"][qi].copy(); s1[excl[q["qid"]]] = -np.inf; s2[excl[q["qid"]]] = -np.inf
         ov.append(len(set(np.argsort(-s1)[:10]) & set(np.argsort(-s2)[:10])))
     out["top10_overlap_between_models"] = {"mean": float(np.mean(ov)), "min": int(min(ov)), "max": int(max(ov))}
-    # --- 閾値分析（プール内ラベル J。人手サブセットは H）
-    def collect(labsrc):
-        rows = []  # (qid, type, unit, rel, cos_sar, cos_bge)
+    # --- 閾値分析
+    deep = {}
+    dp_path = os.path.join(D, "jev_deep.jsonl")
+    if os.path.exists(dp_path):
+        for l in open(dp_path, encoding="utf-8"):
+            r = json.loads(l); deep[r["qid"]] = {int(k): v for k, v in r["p"].items()}
+    labD = {}
+    for qid, pm in deep.items():
+        merged = dict(pm)
+        merged.update(pJ.get(qid, {}))           # プール内は run1・run2 の平均を優先
+        if qid.startswith("K") and pools[qid]["seed"] is not None: merged[pools[qid]["seed"]] = max(merged.get(pools[qid]["seed"], 0), 1.0)
+        labD[qid] = {i for i, p in merged.items() if p >= 0.5}; deep[qid] = merged
+    def collect(src, types):
+        rows = []  # (qid, type, unit, rel, cos_sar, cos_bge, is_seed)
         for qi, q in enumerate(qs):
             qid = q["qid"]
-            if labsrc == "J":
+            if q["type"] not in types: continue
+            if src == "J":
                 if qid not in labJ: continue
-                for i in pools[qid]["pool"]: rows.append((qid, q["type"], i, i in labJ[qid], S["sar"][qi][i], S["bge"][qi][i], i == pools[qid]["seed"]))
+                units_, relset = pools[qid]["pool"], labJ[qid]
+            elif src == "Jdeep":
+                if qid not in labD: continue
+                units_, relset = list(deep[qid]), labD[qid]
             else:
                 if qid not in labH: continue
-                judged, rel = labH[qid]
-                for i in judged: rows.append((qid, q["type"], i, i in rel, S["sar"][qi][i], S["bge"][qi][i], i == pools[qid]["seed"]))
+                units_, relset = labH[qid][0], labH[qid][1]
+            for i in units_: rows.append((qid, q["type"], i, i in relset, S["sar"][qi][i], S["bge"][qi][i], i == pools[qid]["seed"]))
         return rows
-    def qtile(x): 
+    def qtile(x):
         x = np.asarray(x); return {k: float(np.percentile(x, p)) for k, p in (("min", 0), ("p5", 5), ("p25", 25), ("median", 50), ("p75", 75), ("p95", 95), ("max", 100))} if len(x) else None
     thr = {}
     grids = {"sar": [round(0.60 + 0.02 * i, 2) for i in range(0, 14)], "bge": [round(0.30 + 0.02 * i, 2) for i in range(0, 17)]}
-    for src in ("J", "H"):
-        rows = collect(src)
+    for src, types, name in (("Jdeep", "KT", "jev_deep_all"), ("Jdeep", "K", "jev_deep_K"), ("Jdeep", "T", "jev_deep_T"), ("J", "KT", "jev_pool_all"), ("H", "KT", "human_all")):
+        rows = collect(src, types)
         if not rows: continue
-        block = {"pairs": len(rows), "relevant": int(sum(r[3] for r in rows)), "questions": len({r[0] for r in rows})}
+        qids = sorted({r[0] for r in rows})
+        block = {"pairs": len(rows), "relevant": int(sum(r[3] for r in rows)), "questions": len(qids)}
+        byq = {}
+        for r in rows: byq.setdefault(r[0], []).append(r)
         for m, col in (("sar", 4), ("bge", 5)):
             rel = [r[col] for r in rows if r[3]]; non = [r[col] for r in rows if not r[3]]
             block[m + "_cos_relevant"] = qtile(rel); block[m + "_cos_irrelevant"] = qtile(non); block[m + "_auc_pooled"] = auc(rel, non)
-            # 問いの中の AUC の平均
             per = []
-            for qid in {r[0] for r in rows}:
-                p_ = [r[col] for r in rows if r[0] == qid and r[3]]; n_ = [r[col] for r in rows if r[0] == qid and not r[3]]
+            for qid in qids:
+                p_ = [r[col] for r in byq[qid] if r[3]]; n_ = [r[col] for r in byq[qid] if not r[3]]
                 a_ = auc(p_, n_)
                 if a_ is not None: per.append(a_)
             block[m + "_auc_within_question"] = dict(zip(("mean", "lo", "hi"), boot_ci(per))) | {"n": len(per)}
             tab = []
             for t in grids[m]:
-                qids = sorted({r[0] for r in rows}); loss_q = 0; allgone_q = 0; nrelq = 0; seed_n = 0; seed_pass = 0; passed_nonrel = []; passed = []; relp = 0; reltot = 0; nonrel_tot = 0; nonrel_pass = 0
+                loss_q = allgone_q = nrelq = seed_n = seed_pass = relp = reltot = nonrel_tot = nonrel_pass = 0; passed_nonrel = []; passed = []
                 for qid in qids:
-                    rr = [r for r in rows if r[0] == qid]; rl = [r for r in rr if r[3]]; nr = [r for r in rr if not r[3]]
+                    rr = byq[qid]; rl = [r for r in rr if r[3]]; nr = [r for r in rr if not r[3]]
                     if rl:
                         nrelq += 1; ps = [r for r in rl if r[col] >= t]; relp += len(ps); reltot += len(rl)
-                        if len(ps) < len(rl): loss_q += 1
-                        if not ps: allgone_q += 1
+                        loss_q += int(len(ps) < len(rl)); allgone_q += int(not ps)
                     sd = [r for r in rr if r[6]]
                     if sd: seed_n += 1; seed_pass += int(sd[0][col] >= t)
                     pn = [r for r in nr if r[col] >= t]; passed_nonrel.append(len(pn)); nonrel_tot += len(nr); nonrel_pass += len(pn)
                     passed.append(len([r for r in rr if r[col] >= t]))
-                corpus_pass = float(np.mean([(S[m][qi] >= t).sum() for qi, q in enumerate(qs) if q["qid"] in qids]))
+                corpus_pass = float(np.mean([(S[m][qi] >= t).sum() for qi, q in enumerate(qs) if q["qid"] in byq]))
                 tab.append({"t": t, "recall_pairs": relp / reltot if reltot else None, "questions_with_a_relevant_dropped": loss_q / nrelq if nrelq else None,
                             "questions_with_all_relevant_dropped": allgone_q / nrelq if nrelq else None,
                             "seed_pass_rate": seed_pass / seed_n if seed_n else None, "irrelevant_passed_per_q": float(np.mean(passed_nonrel)),
@@ -213,8 +230,52 @@ def main():
                             "precision_pairs": (relp / (relp + nonrel_pass)) if (relp + nonrel_pass) else None,
                             "pool_passed_per_q": float(np.mean(passed)), "corpus_passed_per_q": corpus_pass, "n_relevant_questions": nrelq, "seed_questions": seed_n})
             block[m + "_threshold_table"] = tab
-        thr[src] = block
+            # コサインの帯ごとの関連ありの割合
+            edges = np.arange(0.50, 0.92, 0.02) if m == "sar" else np.arange(0.25, 0.80, 0.05)
+            bands = []
+            for lo in edges:
+                hi = lo + (0.02 if m == "sar" else 0.05)
+                sel = [r for r in rows if lo <= r[col] < hi]
+                if len(sel) >= 30: bands.append({"lo": round(float(lo), 2), "hi": round(float(hi), 2), "n": len(sel), "relevant_rate": float(np.mean([r[3] for r in sel]))})
+            block[m + "_relevance_by_band"] = bands
+        thr[name] = block
     out["thresholds"] = thr
+    # --- 足切りが「引いた上位」に実際どう効くか（上位60＝本番の recall が返す数に近い深さ、上位12＝Jev が使えないときの戻り先）
+    def wilson(k, n, z=1.96):
+        if n == 0: return None
+        ph = k / n; den = 1 + z * z / n; c = ph + z * z / (2 * n); r = z * ((ph * (1 - ph) / n + z * z / (4 * n * n)) ** 0.5)
+        return [float((c - r) / den), float((c + r) / den)]
+    fe = {}
+    for m, ts in (("sar", (0.70, 0.72, 0.74, 0.76, 0.78)), ("bge", (0.35, 0.45))):
+        for t in ts:
+            cnt60, below60, short12, n12, rel12_no, rel12_floor, seedin12_no, seedin12_floor, nseed, hit_no, hit_fl, nq = [], [], 0, [], [], [], 0, 0, 0, 0, 0, 0
+            for qi, q in enumerate(qs):
+                qid = q["qid"]
+                if qid not in labD: continue
+                sc = S[m][qi].copy(); sc[excl[qid]] = -np.inf
+                o = np.argsort(-sc, kind="stable")
+                t60, t12 = o[:60], o[:12]
+                cnt60.append(int((sc[t60] >= t).sum())); below60.append(int((sc[t60] < t).sum()))
+                kept = [i for i in t12 if sc[i] >= t]; n12.append(len(kept)); short12 += int(len(kept) < 12)
+                nq += 1
+                r_no = [int(i in labD[qid]) for i in t12]; r_fl = [int(i in labD[qid]) for i in kept]
+                rel12_no.append(sum(r_no) / 12); rel12_floor.append(sum(r_fl) / len(r_fl) if r_fl else 0.0)
+                hit_no += int(any(r_no)); hit_fl += int(any(r_fl))
+                if q["type"] == "K":
+                    nseed += 1; sd = pools[qid]["seed"]; seedin12_no += int(sd in set(map(int, t12))); seedin12_floor += int(sd in set(map(int, kept)))
+            fe[f"{m}_{t:.2f}"] = {"questions": nq, "top60_passing_mean": float(np.mean(cnt60)), "top60_below_mean": float(np.mean(below60)),
+                                  "questions_with_any_top60_below": float(np.mean([b > 0 for b in below60])),
+                                  "top12_returned_mean": float(np.mean(n12)), "questions_top12_short": short12 / nq,
+                                  "top12_precision_no_floor": float(np.mean(rel12_no)), "top12_precision_with_floor": float(np.mean(rel12_floor)),
+                                  "top12_hit_no_floor": hit_no / nq, "top12_hit_with_floor": hit_fl / nq,
+                                  "K_seed_in_top12_no_floor": seedin12_no / nseed if nseed else None, "K_seed_in_top12_with_floor": seedin12_floor / nseed if nseed else None,
+                                  "K_seed_questions": nseed}
+    out["floor_effect"] = fe
+    ks = {}
+    for t in (0.70, 0.74):
+        n = sum(1 for q in qs if q["type"] == "K"); k = int(round(next(r["seed_pass_rate"] for r in thr["jev_deep_K"]["sar_threshold_table"] if r["t"] == t) * n))
+        ks[f"{t:.2f}"] = {"passed": k, "of": n, "wilson95": wilson(k, n)}
+    out["seed_pass_wilson"] = ks
     # --- 全記憶のコサイン分布（問い×全記憶。除外を除く）
     cd = {}
     for m in ("sar", "bge"):

@@ -10,6 +10,7 @@
 - 判定は yesno の p。ラベルは p>=0.5。judge.py の学習キャッシュ（.agents/configs、git 管理外）は judge.py 自身が更新する。
 """
 import argparse, json, os, random, sys, time
+import sys as _s, os as _o; _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
 from common import *
 
 JUDGE_DIR = os.environ.get("JUDGE_DIR", "/home/takano32/nilkani06/scripts")
@@ -23,11 +24,11 @@ Q_K = ("`question` is something a person asks the bot, and `expected_answer` is 
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--run", type=int, required=True); ap.add_argument("--only", default="")
+    ap = argparse.ArgumentParser(); ap.add_argument("--run", type=int, required=True); ap.add_argument("--only", default=""); ap.add_argument("--deep", action="store_true")
     a = ap.parse_args()
     sys.path.insert(0, JUDGE_DIR); import judge
     units = load_units(); qs = load_questions(); pools = json.load(open(os.path.join(D, "pools.json")))
-    out_path = os.path.join(D, "jev_labels.jsonl"); done = set()
+    out_path = os.path.join(D, "jev_deep.jsonl" if a.deep else "jev_labels.jsonl"); done = set()
     if os.path.exists(out_path):
         for l in open(out_path, encoding="utf-8"):
             r = json.loads(l); done.add((r["qid"], r["run"]))
@@ -36,23 +37,28 @@ def main():
     with open(out_path, "a", encoding="utf-8") as f:
         for q in qs:
             if (q["qid"], a.run) in done or (only and q["qid"] not in only): continue
-            pl = list(pools[q["qid"]]["pool"]); random.Random(f"{q['qid']}-{a.run}").shuffle(pl)
-            keys = [f"m{i:02d}" for i in range(len(pl))]
-            mem = {k: units[i]["text"][:300] for k, i in zip(keys, pl)}
-            if q["type"] == "K":
-                state = {"question": q["query"], "expected_answer": q["answer"], "memories": mem}; tpl = Q_K
-            else:
-                state = {"message": q["query"], "memories": mem}; tpl = Q_T
-            questions = {k: {"type": "yesno", "question": tpl.format(key=k)} for k in keys}
-            t0 = time.time(); ans = None
-            for attempt in range(3):
-                ans = judge.ask(state, questions, timeout=90)
-                if isinstance(ans, dict) and all(k in ans for k in keys): break
-                time.sleep(2 + 3 * attempt)
-            if not (isinstance(ans, dict) and all(k in ans for k in keys)):
+            pl = list(pools[q["qid"]]["deep" if a.deep else "pool"]); random.Random(f"{q['qid']}-{a.run}").shuffle(pl)
+            chunks = [pl[i:i + 60] for i in range(0, len(pl), 60)] if a.deep else [pl]
+            res = {}; t0 = time.time(); ok = True
+            for ch in chunks:
+                keys = [f"m{i:02d}" for i in range(len(ch))]
+                mem = {k: units[i]["text"][:300] for k, i in zip(keys, ch)}
+                if q["type"] == "K":
+                    state = {"question": q["query"], "expected_answer": q["answer"], "memories": mem}; tpl = Q_K
+                else:
+                    state = {"message": q["query"], "memories": mem}; tpl = Q_T
+                questions = {k: {"type": "yesno", "question": tpl.format(key=k)} for k in keys}
+                ans = None
+                for attempt in range(3):
+                    ans = judge.ask(state, questions, timeout=90)
+                    if isinstance(ans, dict) and all(k in ans for k in keys): break
+                    time.sleep(2 + 3 * attempt)
+                if not (isinstance(ans, dict) and all(k in ans for k in keys)):
+                    ok = False; break
+                res.update({str(i): float(ans[k]["p"]) for k, i in zip(keys, ch)})
+            if not ok:
                 print("FAIL", q["qid"], flush=True); continue
-            f.write(json.dumps({"qid": q["qid"], "run": a.run, "p": {str(i): float(ans[k]["p"]) for k, i in zip(keys, pl)},
-                                "sec": round(time.time() - t0, 2)}) + "\n"); f.flush(); n += 1
+            f.write(json.dumps({"qid": q["qid"], "run": a.run, "p": res, "chunks": len(chunks), "sec": round(time.time() - t0, 2)}) + "\n"); f.flush(); n += 1
             if n % 20 == 0: print(f"{n} done, {time.time()-t_all:.0f}s", flush=True)
     print("finished", n, f"{time.time()-t_all:.0f}s")
 

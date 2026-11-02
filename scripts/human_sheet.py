@@ -6,6 +6,7 @@
   python3 -I scripts/human_sheet.py record answers.txt   # 「qid: 番号 番号 …」（関連ありの番号）を data/human_labels.json へ
 """
 import json, os, random, re, sys
+import sys as _s, os as _o; _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
 from common import *
 
 

@@ -9,6 +9,7 @@
 import json, os, random, subprocess, sys, time, urllib.request
 from datetime import datetime
 import numpy as np
+import sys as _s, os as _o; _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
 from common import *
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 24
